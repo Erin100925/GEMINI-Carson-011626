@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FDA 510(k) Review Studio</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              primary: 'var(--color-primary)',
+              secondary: 'var(--color-secondary)',
+              accent: 'var(--color-accent)',
+              background: 'var(--color-bg)',
+              surface: 'var(--color-surface)',
+              text: 'var(--color-text)',
+              coral: '#FF7F50',
+            },
+            animation: {
+              'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              'float': 'float 6s ease-in-out infinite',
+            },
+            keyframes: {
+              float: {
+                '0%, 100%': { transform: 'translateY(0)' },
+                '50%': { transform: 'translateY(-10px)' },
+              }
+            }
+          },
+        },
+      }
+    </script>
+    <style>
+      body {
+        background-color: var(--color-bg);
+        color: var(--color-text);
+        transition: background-color 0.5s ease, color 0.5s ease;
+      }
+      /* Markdown Styles */
+      .markdown-body h1 { font-size: 1.5rem; font-weight: bold; margin-bottom: 1rem; }
+      .markdown-body h2 { font-size: 1.25rem; font-weight: bold; margin-bottom: 0.75rem; }
+      .markdown-body p { margin-bottom: 0.75rem; line-height: 1.6; }
+      .markdown-body ul { list-style-type: disc; padding-left: 1.5rem; margin-bottom: 1rem; }
+      .markdown-body table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+      .markdown-body th, .markdown-body td { border: 1px solid rgba(128,128,128,0.3); padding: 0.5rem; }
+      .markdown-body th { background-color: rgba(128,128,128,0.1); }
+      
+      /* Custom Scrollbar */
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: rgba(156, 163, 175, 0.5); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(156, 163, 175, 0.8); }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "recharts": "https://esm.sh/recharts@^3.6.0",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react-markdown": "https://esm.sh/react-markdown@^10.1.0",
+    "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
+    "@google/genai": "https://esm.sh/@google/genai@^1.37.0"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
