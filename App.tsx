@@ -56,12 +56,20 @@ const App: React.FC = () => {
     const [pdfUrl, setPdfUrl] = useState<string>('');
     const [pagesToOcr, setPagesToOcr] = useState<string>('1-1');
     const [ocrModel, setOcrModel] = useState<string>(AVAILABLE_MODELS[0]);
+    const [ocrEditMode, setOcrEditMode] = useState(false);
 
     // PDF text extraction helper using pdfjs
     const extractPdfText = async (file: File, pagesSpec: string) => {
         try {
             const arrayBuffer = await file.arrayBuffer();
-            const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+            // Ensure worker is set for pdfjs (use unpkg CDN matching installed version)
+            try {
+                const v = (pdfjsLib as any).version || 'latest';
+                (pdfjsLib as any).GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${v}/build/pdf.worker.min.js`;
+            } catch (werr) {
+                // ignore
+            }
+            const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) });
             const pdf = await loadingTask.promise;
             const numPages = pdf.numPages;
 
@@ -94,7 +102,7 @@ const App: React.FC = () => {
             return fullText.trim();
         } catch (err) {
             console.error('PDF extract error', err);
-            return '';
+            throw err;
         }
     };
 
@@ -378,21 +386,56 @@ const App: React.FC = () => {
                             // If a PDF file is loaded, extract text from selected pages first
                             let extracted = ocrInput;
                             if (pdfFile) {
-                                extracted = await extractPdfText(pdfFile, pagesToOcr);
+                                try {
+                                    extracted = await extractPdfText(pdfFile, pagesToOcr);
+                                } catch (err: any) {
+                                    console.error('Extraction failed', err);
+                                    alert('PDF extraction failed: ' + (err?.message || String(err)));
+                                    return;
+                                }
                             }
+
                             if (!extracted || extracted.trim().length === 0) {
                                 alert('No text extracted. Please pick a PDF with selectable text or paste content into the editor.');
                                 return;
                             }
+
+                            // Show the extracted text in the editor immediately so user can tweak before LLM
+                            setOcrInput(extracted);
+                            setOcrOutput('');
+                            setOcrEditMode(true);
+
                             const pagesNote = pagesToOcr ? `Pages: ${pagesToOcr}.` : '';
                             const prompt = `You are an expert document analyst. Extract and structure the important regulatory content from the following submission text (${pagesNote}). Produce a clean markdown report with headings: Summary, Device, Indication, Predicate, Key Findings, Action Items. Preserve section markers and include quoted snippets where relevant.`;
-                            handleRunAI(prompt, extracted, ocrModel, setOcrOutput, { maxTokens: 2000 });
+
+                            // Run LLM and populate results when done
+                            try {
+                                await handleRunAI(prompt, extracted, ocrModel, setOcrOutput, { maxTokens: 2000 });
+                                setOcrEditMode(false);
+                            } catch (err) {
+                                // handleRunAI shows alerts on failure
+                            }
                         }} className="bg-secondary text-white px-4 py-1 rounded shadow hover:brightness-110">Execute OCR</button>
                     </div>
 
                     <div className="h-64 bg-background/50 rounded-lg p-4 overflow-y-auto markdown-body relative">
                         {loading && <LoadingOverlay />}
-                        <ReactMarkdown>{ocrOutput}</ReactMarkdown>
+                        {ocrEditMode ? (
+                            <div className="flex flex-col h-full">
+                                <textarea value={ocrOutput || ocrInput} onChange={e => setOcrOutput(e.target.value)} className="flex-1 p-2 bg-white text-black rounded resize-none" />
+                                <div className="flex gap-2 mt-2">
+                                    <button onClick={() => { setOcrEditMode(false); }} className="px-3 py-1 bg-gray-200 rounded">Close Editor</button>
+                                    <button onClick={() => { setOcrInput(ocrOutput); setOcrEditMode(false); }} className="px-3 py-1 bg-primary text-white rounded">Save to Input</button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div>
+                                <div className="flex justify-end mb-2">
+                                    <button onClick={() => setOcrEditMode(true)} className="px-2 py-1 bg-white/10 rounded text-sm">Edit</button>
+                                </div>
+                                <ReactMarkdown>{ocrOutput}</ReactMarkdown>
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
