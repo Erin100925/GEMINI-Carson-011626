@@ -6,6 +6,7 @@ import Dashboard from './components/Dashboard';
 import { callGemini } from './services/geminiService';
 import { Layout, FileText, Settings, BookOpen, PenTool, ClipboardList, Wand2, Upload, Download, Play, Save } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf';
 
 // --- Tab Components (Internal to App for shared state access simplicity in this format) ---
 
@@ -46,14 +47,66 @@ const App: React.FC = () => {
   
   const [guidanceInput, setGuidanceInput] = useState('');
   const [guidanceOutput, setGuidanceOutput] = useState('');
+    const [guidancePrompt, setGuidancePrompt] = useState("Create a comprehensive review guideline with a checklist based on the provided text.");
 
   const [ocrInput, setOcrInput] = useState(''); // Text content extracted from PDF
   const [ocrOutput, setOcrOutput] = useState(''); // Summary/Analysis
   const [ocrAgentId, setOcrAgentId] = useState(agents[0].id);
+    const [pdfFile, setPdfFile] = useState<File | null>(null);
+    const [pdfUrl, setPdfUrl] = useState<string>('');
+    const [pagesToOcr, setPagesToOcr] = useState<string>('1-1');
+    const [ocrModel, setOcrModel] = useState<string>(AVAILABLE_MODELS[0]);
+
+    // PDF text extraction helper using pdfjs
+    const extractPdfText = async (file: File, pagesSpec: string) => {
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+            const pdf = await loadingTask.promise;
+            const numPages = pdf.numPages;
+
+            // parse pagesSpec like "1-3,5"
+            const ranges = pagesSpec.split(',').map(s => s.trim()).filter(Boolean);
+            const pages: number[] = [];
+            for (const r of ranges) {
+                if (r.includes('-')) {
+                    const [a,b] = r.split('-').map(x => parseInt(x.trim(),10));
+                    if (!isNaN(a) && !isNaN(b)) {
+                        for (let i = Math.max(1,a); i <= Math.min(b,numPages); i++) pages.push(i);
+                    }
+                } else {
+                    const p = parseInt(r,10);
+                    if (!isNaN(p) && p >= 1 && p <= numPages) pages.push(p);
+                }
+            }
+            // if no pages parsed, default to 1..min(5,numPages)
+            if (pages.length === 0) {
+                for (let i = 1; i <= Math.min(5, numPages); i++) pages.push(i);
+            }
+
+            let fullText = '';
+            for (const p of pages) {
+                const page = await pdf.getPage(p);
+                const content = await page.getTextContent();
+                const pageText = content.items.map((it: any) => it.str).join(' ');
+                fullText += `\n\n--- PAGE ${p} ---\n\n` + pageText;
+            }
+            return fullText.trim();
+        } catch (err) {
+            console.error('PDF extract error', err);
+            return '';
+        }
+    };
 
   const [noteInput, setNoteInput] = useState('');
   const [noteOutput, setNoteOutput] = useState('');
   const [noteKeywords, setNoteKeywords] = useState('');
+    const [geminiApiKey, setGeminiApiKey] = useState('');
+    const [openaiApiKey, setOpenaiApiKey] = useState('');
+    const [selectedModel, setSelectedModel] = useState<string>(AVAILABLE_MODELS[0] || '');
+    const [sidebarOpen, setSidebarOpen] = useState(true);
+    const [geminiKeyFromEnv, setGeminiKeyFromEnv] = useState(false);
+    const [openaiKeyFromEnv, setOpenaiKeyFromEnv] = useState(false);
 
   // --- Effects ---
   useEffect(() => {
@@ -67,6 +120,40 @@ const App: React.FC = () => {
     root.style.setProperty('--color-surface', theme.colors.surface);
     root.style.setProperty('--color-text', theme.colors.text);
   }, [appState.themeId]);
+
+    // Load saved keys and selected model from localStorage, but prefer env values (don't expose them)
+    useEffect(() => {
+        try {
+            const env = (import.meta as any)?.env || {};
+            const envGemini = env?.VITE_API_KEY || env?.VITE_GEMINI_API_KEY || '';
+            const envOpenai = env?.VITE_OPENAI_API_KEY || '';
+
+            if (envGemini) {
+                setGeminiKeyFromEnv(true);
+                setGeminiApiKey('');
+            } else {
+                const g = localStorage.getItem('gemini_api_key') || '';
+                setGeminiApiKey(g);
+            }
+
+            if (envOpenai) {
+                setOpenaiKeyFromEnv(true);
+                setOpenaiApiKey('');
+            } else {
+                const o = localStorage.getItem('openai_api_key') || '';
+                setOpenaiApiKey(o);
+            }
+
+            const m = localStorage.getItem('selected_model') || AVAILABLE_MODELS[0] || '';
+            setSelectedModel(m);
+        } catch (e) {
+            // ignore
+        }
+    }, []);
+
+    useEffect(() => { localStorage.setItem('gemini_api_key', geminiApiKey || ''); }, [geminiApiKey]);
+    useEffect(() => { localStorage.setItem('openai_api_key', openaiApiKey || ''); }, [openaiApiKey]);
+    useEffect(() => { localStorage.setItem('selected_model', selectedModel || ''); }, [selectedModel]);
 
   // --- Helpers ---
   const updateMetrics = (provider: string, duration: number, tokens: number) => {
@@ -96,16 +183,32 @@ const App: React.FC = () => {
       alert("Not enough Mana! Wait for recharge.");
       return;
     }
-    setLoading(true);
+        // Validate model/provider and keys
+        const env = (import.meta as any)?.env || {};
+        const envGemini = env?.VITE_API_KEY || env?.VITE_GEMINI_API_KEY || '';
+        const hasGeminiKey = !!(geminiApiKey || envGemini);
+
+        if (model.startsWith('gemini') && !hasGeminiKey) {
+            alert('Gemini model selected but no Gemini API key configured. Add it in the Keys sidebar or set VITE_API_KEY.');
+            return;
+        }
+
+        if (!model.startsWith('gemini')) {
+            alert('Selected model appears to be non-Gemini. In-browser support is limited; use a server proxy for other providers.');
+            return;
+        }
+
+        setLoading(true);
     const start = Date.now();
-    try {
-      const result = await callGemini(
-        model,
-        prompt,
-        userContent,
-        0.5,
-        config.maxTokens || 4000
-      );
+        try {
+            const result = await callGemini(
+                model,
+                prompt,
+                userContent,
+                0.5,
+                config.maxTokens || 4000,
+                geminiApiKey // use user-provided key if present
+            );
       setOutput(result);
       updateMetrics('gemini', (Date.now() - start) / 1000, 100); // approx tokens
     } catch (e: any) {
@@ -165,7 +268,7 @@ const App: React.FC = () => {
                         onClick={() => handleRunAI(
                             "Create a comprehensive summary of this 510(k) document in markdown. Highlight key regulatory terms (like 'Predicate', 'Indication', 'SE') by wrapping them in spans with class 'text-coral' or simply ensure they stand out.", 
                             summaryInput, 
-                            "gemini-2.5-flash", 
+                            selectedModel, 
                             setSummaryOutput
                         )}
                         className="bg-primary hover:bg-opacity-90 text-white px-4 py-1 rounded-full text-sm flex items-center gap-2 transition-transform active:scale-95"
@@ -193,23 +296,25 @@ const App: React.FC = () => {
     <div className="space-y-4 animate-fadeIn">
       <div className="bg-surface p-6 rounded-xl shadow-lg border border-white/20">
         <h2 className="text-2xl font-bold mb-4 flex items-center gap-2"><BookOpen /> Review Guidance Generator</h2>
-        <textarea 
-            className="w-full h-32 p-3 rounded-lg bg-background/50 border border-white/10 mb-4"
-            value={guidanceInput}
-            onChange={(e) => setGuidanceInput(e.target.value)}
-            placeholder="Paste guidance text or instructions..."
-        />
-        <button 
-            onClick={() => handleRunAI(
-                "Create a comprehensive review guideline with a checklist based on the provided text.", 
-                guidanceInput, 
-                "gemini-3-flash-preview", 
-                setGuidanceOutput
-            )}
-            className="bg-accent text-white px-6 py-2 rounded-lg font-bold shadow-lg hover:brightness-110 mb-4"
-        >
-            Generate Checklist
-        </button>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <textarea 
+                className="md:col-span-2 w-full h-32 p-3 rounded-lg bg-background/50 border border-white/10"
+                value={guidanceInput}
+                onChange={(e) => setGuidanceInput(e.target.value)}
+                placeholder="Paste guidance text or instructions..."
+            />
+
+            <div className="flex flex-col gap-2">
+                <label className="text-sm font-semibold">System Prompt (editable)</label>
+                <textarea className="h-24 p-2 rounded bg-black/20 border border-white/10 text-sm" value={guidancePrompt} onChange={e => setGuidancePrompt(e.target.value)} />
+                <label className="text-sm font-semibold">Model</label>
+                <select className="p-2 rounded bg-black/20 border border-white/10 text-sm" value={selectedModel} onChange={e => setSelectedModel(e.target.value)}>
+                    {AVAILABLE_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+                <button onClick={() => handleRunAI(guidancePrompt, guidanceInput, selectedModel, setGuidanceOutput)} className="mt-2 bg-accent text-white px-4 py-2 rounded">Generate Checklist</button>
+            </div>
+        </div>
+
         <div className="bg-background/50 p-4 rounded-lg min-h-[200px] markdown-body">
              {loading && <LoadingOverlay />}
              <ReactMarkdown>{guidanceOutput}</ReactMarkdown>
@@ -229,12 +334,28 @@ const App: React.FC = () => {
                     <div className="border-2 border-dashed border-white/30 rounded-xl p-6 text-center hover:bg-white/5 transition-colors cursor-pointer">
                         <Upload className="mx-auto mb-2 opacity-70" />
                         <p className="text-sm">Upload Submission PDF</p>
-                        <input type="file" className="opacity-0 absolute inset-0 cursor-pointer" accept=".pdf" onChange={(e) => handleFileUpload(e, setOcrInput)} />
+                        <input type="file" className="opacity-0 absolute inset-0 cursor-pointer" accept=".pdf" onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            setPdfFile(file);
+                            const url = URL.createObjectURL(file);
+                            setPdfUrl(url);
+                            // keep text placeholder in editor
+                            handleFileUpload(e, setOcrInput);
+                        }} />
                     </div>
                     {ocrInput && (
                         <div className="bg-white text-black p-4 rounded h-64 overflow-y-auto text-xs font-mono">
                             <p className="text-gray-500 italic mb-2">-- Simulated OCR Preview (Page 1-5) --</p>
                             {ocrInput}
+                        </div>
+                    )}
+                    {pdfUrl && (
+                        <div>
+                            <label className="text-sm font-semibold">PDF Preview</label>
+                            <iframe src={pdfUrl} className="w-full h-64 border rounded mt-2" />
+                            <label className="text-sm font-semibold mt-2">Pages to OCR (e.g. 1-3,5)</label>
+                            <input value={pagesToOcr} onChange={e => setPagesToOcr(e.target.value)} className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm mt-1" />
                         </div>
                     )}
                 </div>
@@ -249,25 +370,24 @@ const App: React.FC = () => {
                     />
                     
                     <div className="flex gap-2 items-center bg-background/30 p-2 rounded-lg">
-                        <span className="text-sm font-bold whitespace-nowrap">Agent:</span>
-                        <select 
-                            className="bg-transparent border border-white/20 rounded px-2 py-1 text-sm flex-1"
-                            value={ocrAgentId}
-                            onChange={(e) => setOcrAgentId(e.target.value)}
-                        >
-                            {agents.map(a => <option key={a.id} value={a.id}>{a.name} ({a.model})</option>)}
+                        <span className="text-sm font-bold whitespace-nowrap">Model:</span>
+                        <select className="bg-transparent border border-white/20 rounded px-2 py-1 text-sm flex-1" value={ocrModel} onChange={e => setOcrModel(e.target.value)}>
+                            {AVAILABLE_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
                         </select>
-                        <button 
-                            onClick={() => {
-                                const agent = agents.find(a => a.id === ocrAgentId);
-                                if (agent) {
-                                    handleRunAI(agent.systemPrompt, ocrInput, agent.model, setOcrOutput, { maxTokens: agent.maxTokens });
-                                }
-                            }}
-                            className="bg-secondary text-white px-4 py-1 rounded shadow hover:brightness-110"
-                        >
-                            Execute Agent
-                        </button>
+                        <button onClick={async () => {
+                            // If a PDF file is loaded, extract text from selected pages first
+                            let extracted = ocrInput;
+                            if (pdfFile) {
+                                extracted = await extractPdfText(pdfFile, pagesToOcr);
+                            }
+                            if (!extracted || extracted.trim().length === 0) {
+                                alert('No text extracted. Please pick a PDF with selectable text or paste content into the editor.');
+                                return;
+                            }
+                            const pagesNote = pagesToOcr ? `Pages: ${pagesToOcr}.` : '';
+                            const prompt = `You are an expert document analyst. Extract and structure the important regulatory content from the following submission text (${pagesNote}). Produce a clean markdown report with headings: Summary, Device, Indication, Predicate, Key Findings, Action Items. Preserve section markers and include quoted snippets where relevant.`;
+                            handleRunAI(prompt, extracted, ocrModel, setOcrOutput, { maxTokens: 2000 });
+                        }} className="bg-secondary text-white px-4 py-1 rounded shadow hover:brightness-110">Execute OCR</button>
                     </div>
 
                     <div className="h-64 bg-background/50 rounded-lg p-4 overflow-y-auto markdown-body relative">
@@ -305,43 +425,19 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="space-y-2">
-                    <div className="grid grid-cols-2 gap-2 mb-2">
-                        <button 
-                            onClick={() => handleRunAI(
-                                `Organize these notes into structured markdown. Highlight these keywords in coral color using HTML span style: ${noteKeywords}`, 
-                                noteInput, "gemini-2.5-flash", setNoteOutput
-                            )}
-                            className="bg-primary/80 hover:bg-primary p-2 rounded text-xs flex items-center justify-center gap-1"
-                        >
-                            <Wand2 size={12}/> Organize & Highlight
-                        </button>
-                        <button 
-                             onClick={() => handleRunAI(
-                                `Extract action items and format as a checklist.`, 
-                                noteInput, "gemini-2.5-flash", setNoteOutput
-                            )}
-                            className="bg-secondary/80 hover:bg-secondary p-2 rounded text-xs flex items-center justify-center gap-1"
-                        >
-                            <ClipboardList size={12}/> Action Items
-                        </button>
-                        <button 
-                             onClick={() => handleRunAI(
-                                `Explain technical terms found in the notes in a glossary format.`, 
-                                noteInput, "gemini-3-flash-preview", setNoteOutput
-                            )}
-                            className="bg-accent/80 hover:bg-accent p-2 rounded text-xs flex items-center justify-center gap-1"
-                        >
-                            <BookOpen size={12}/> Glossary
-                        </button>
-                        <button 
-                             onClick={() => handleRunAI(
-                                `Rewrite these notes to be more professional and concise for an FDA report.`, 
-                                noteInput, "gemini-2.5-flash-lite", setNoteOutput
-                            )}
-                            className="bg-green-600/80 hover:bg-green-600 p-2 rounded text-xs flex items-center justify-center gap-1"
-                        >
-                            <PenTool size={12}/> Polish
-                        </button>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2 items-end">
+                        <div className="flex gap-2">
+                            <select value={selectedModel} onChange={e => setSelectedModel(e.target.value)} className="p-2 rounded bg-black/20 border border-white/10 text-sm">
+                                {AVAILABLE_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                            <button onClick={() => handleRunAI(`Organize these notes into structured markdown. Highlight these keywords in coral color using HTML span style: ${noteKeywords}`, noteInput, selectedModel, setNoteOutput)} className="bg-primary/80 hover:bg-primary p-2 rounded text-xs"> <Wand2 size={12}/> Organize</button>
+                            <button onClick={() => handleRunAI(`Extract action items and format as a checklist.`, noteInput, selectedModel, setNoteOutput)} className="bg-secondary/80 hover:bg-secondary p-2 rounded text-xs"> <ClipboardList size={12}/> Action Items</button>
+                            <button onClick={() => handleRunAI(`Explain technical terms found in the notes in a glossary format.`, noteInput, selectedModel, setNoteOutput)} className="bg-accent/80 hover:bg-accent p-2 rounded text-xs"> <BookOpen size={12}/> Glossary</button>
+                            <button onClick={() => handleRunAI(`Rewrite these notes to be more professional and concise for an FDA report.`, noteInput, selectedModel, setNoteOutput)} className="bg-green-600/80 hover:bg-green-600 p-2 rounded text-xs"> <PenTool size={12}/> Polish</button>
+                        </div>
                     </div>
                     
                     <div className="w-full h-[340px] p-4 rounded-lg bg-background/50 border border-white/10 overflow-y-auto markdown-body relative">
@@ -396,6 +492,58 @@ const App: React.FC = () => {
                 </div>
             </div>
             
+            <div className="mt-6 border-t pt-4">
+                <h3 className="font-bold mb-2">API Keys & Model</h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label className="text-sm font-semibold">Gemini API Key</label>
+                            {geminiKeyFromEnv ? (
+                                <div className="text-sm italic text-green-400">Loaded from environment (hidden)</div>
+                            ) : (
+                                <>
+                                    <input
+                                        type="password"
+                                        value={geminiApiKey}
+                                        onChange={(e) => setGeminiApiKey(e.target.value)}
+                                        placeholder="Paste Gemini API key"
+                                        className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm"
+                                    />
+                                    <p className="text-xs opacity-70 mt-1">Stored locally in browser.</p>
+                                </>
+                            )}
+                    </div>
+
+                    <div>
+                        <label className="text-sm font-semibold">OpenAI API Key</label>
+                        {openaiKeyFromEnv ? (
+                            <div className="text-sm italic text-green-400">Loaded from environment (hidden)</div>
+                        ) : (
+                            <>
+                                <input
+                                    type="password"
+                                    value={openaiApiKey}
+                                    onChange={(e) => setOpenaiApiKey(e.target.value)}
+                                    placeholder="Paste OpenAI API key"
+                                    className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm"
+                                />
+                                <p className="text-xs opacity-70 mt-1">Stored locally; use server proxy for production.</p>
+                            </>
+                        )}
+                    </div>
+
+                    <div>
+                        <label className="text-sm font-semibold">Selected Model</label>
+                        <select
+                            value={selectedModel}
+                            onChange={(e) => setSelectedModel(e.target.value)}
+                            className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm"
+                        >
+                            {AVAILABLE_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+                        </select>
+                        <p className="text-xs opacity-70 mt-1">Used by the main action buttons.</p>
+                    </div>
+                </div>
+            </div>
         </div>
       </div>
   );
@@ -440,6 +588,44 @@ const App: React.FC = () => {
       </header>
 
       {/* Main Content */}
+      {/* Sidebar for API keys */}
+      <div className={`fixed left-0 top-16 h-[calc(100vh-4rem)] w-72 p-4 bg-surface/95 border-r border-white/10 shadow-lg z-50 transform transition-transform ${sidebarOpen ? 'translate-x-0' : '-translate-x-72'}`}>
+          <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold">API Keys & Model</h3>
+              <button onClick={() => setSidebarOpen(false)} className="text-sm px-2 py-1 bg-white/5 rounded">Hide</button>
+          </div>
+          <div className="space-y-3">
+              <div>
+                  <label className="text-xs font-semibold">Gemini API</label>
+                  {geminiKeyFromEnv ? (
+                      <div className="text-sm italic text-green-400">Loaded from environment (hidden)</div>
+                  ) : (
+                      <input type="password" value={geminiApiKey} onChange={e => setGeminiApiKey(e.target.value)} placeholder="Paste Gemini API key" className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm" />
+                  )}
+              </div>
+
+              <div>
+                  <label className="text-xs font-semibold">OpenAI API</label>
+                  {openaiKeyFromEnv ? (
+                      <div className="text-sm italic text-green-400">Loaded from environment (hidden)</div>
+                  ) : (
+                      <input type="password" value={openaiApiKey} onChange={e => setOpenaiApiKey(e.target.value)} placeholder="Paste OpenAI API key" className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm" />
+                  )}
+              </div>
+
+              <div>
+                  <label className="text-xs font-semibold">Model</label>
+                  <select value={selectedModel} onChange={e => setSelectedModel(e.target.value)} className="w-full p-2 rounded bg-black/20 border border-white/10 text-sm">
+                      {AVAILABLE_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+              </div>
+          </div>
+      </div>
+
+      {/* Sidebar toggle when hidden */}
+      {!sidebarOpen && (
+          <button onClick={() => setSidebarOpen(true)} className="fixed left-0 top-28 z-50 bg-primary text-white px-2 py-1 rounded-r">Keys</button>
+      )}
       <main className="container mx-auto px-4 py-8 max-w-7xl">
         <StatusHUD state={appState} />
 
